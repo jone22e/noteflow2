@@ -85,6 +85,28 @@ const activeFile = computed(() => openFiles.find((entry) => entry.path === activ
 
 const activeFileLanguage = computed(() => activeFile.value?.language || 'plaintext')
 
+const selectedRepoDetails = computed(() => {
+  const repo = selectedRepo.value
+  if (!repo) {
+    return null
+  }
+
+  const formatNumber = (value) => Number(value ?? 0).toLocaleString('pt-BR')
+
+  return {
+    name: repo.name,
+    fullName: repo.full_name,
+    description: repo.description?.trim() || '',
+    visibility: repo.private ? 'Privado' : 'Público',
+    language: repo.language || 'Não informada',
+    defaultBranch: repo.default_branch || 'main',
+    updatedAt: repo.updated_at ? new Date(repo.updated_at).toLocaleString('pt-BR') : '—',
+    stars: formatNumber(repo.stargazers_count),
+    forks: formatNumber(repo.forks_count),
+    issues: formatNumber(repo.open_issues_count),
+  }
+})
+
 function detectLanguage(path) {
   if (!path) {
     return 'plaintext'
@@ -460,9 +482,12 @@ async function loadRepositoryFiles() {
   try {
     const headers = buildHeaders()
     const branch = selectedRepo.value.default_branch || 'main'
-    const treeResponse = await fetch(`https://api.github.com/repos/${selectedRepo.value.full_name}/git/trees/${branch}?recursive=1`, {
-      headers,
-    })
+    const treeResponse = await fetch(
+      `https://api.github.com/repos/${selectedRepo.value.full_name}/git/trees/${branch}?recursive=1`,
+      {
+        headers,
+      },
+    )
     if (!treeResponse.ok) {
       throw new Error('Falha ao carregar a árvore de arquivos do repositório.')
     }
@@ -581,6 +606,15 @@ onBeforeUnmount(() => {
   <div class="codex-shell">
     <aside class="toolbar">
       <div class="toolbar__brand" aria-label="Codex web">⌘</div>
+      <button
+        class="toolbar__repo-button"
+        type="button"
+        :aria-pressed="showRepoPanel"
+        @click="toggleRepositorySelector"
+      >
+        <i class="codicon codicon-repo"></i>
+        <span>{{ showRepoPanel ? 'Ocultar repositórios' : 'Selecionar repositório' }}</span>
+      </button>
       <div class="toolbar__buttons">
         <button
           v-for="button in actionButtons"
@@ -596,13 +630,6 @@ onBeforeUnmount(() => {
     </aside>
 
     <div class="workspace">
-      <div v-if="selectedRepo" class="workspace-actions">
-        <button class="repo-toggle" type="button" @click="toggleRepositorySelector">
-          <i class="codicon codicon-repo"></i>
-          <span>{{ showRepoPanel ? 'Ocultar repositórios' : 'Selecionar repositório' }}</span>
-        </button>
-      </div>
-
       <section
         v-if="showRepoPanel || !selectedRepo"
         class="panel repositories"
@@ -784,13 +811,51 @@ onBeforeUnmount(() => {
         @pointerdown="(event) => startResize('editor', 'context', event)"
       ></div>
 
-      <section class="panel webview" :style="{ width: `${panelSizes.context}px` }">
-        <iframe
-          src="https://chatgpt.com/codex"
-          title="Codex web preview"
-          loading="lazy"
-          referrerpolicy="no-referrer"
-        ></iframe>
+      <section class="panel context" :style="{ width: `${panelSizes.context}px` }">
+        <div v-if="selectedRepoDetails" class="context-card">
+          <header class="context-card__header">
+            <div>
+              <h2>{{ selectedRepoDetails.name }}</h2>
+              <p class="context-card__full-name">{{ selectedRepoDetails.fullName }}</p>
+            </div>
+            <span class="context-card__badge">{{ selectedRepoDetails.visibility }}</span>
+          </header>
+          <p v-if="selectedRepoDetails.description" class="context-card__description">
+            {{ selectedRepoDetails.description }}
+          </p>
+          <dl class="context-card__meta">
+            <div>
+              <dt>Linguagem</dt>
+              <dd>{{ selectedRepoDetails.language }}</dd>
+            </div>
+            <div>
+              <dt>Branch padrão</dt>
+              <dd>{{ selectedRepoDetails.defaultBranch }}</dd>
+            </div>
+            <div>
+              <dt>Atualizado em</dt>
+              <dd>{{ selectedRepoDetails.updatedAt }}</dd>
+            </div>
+          </dl>
+          <ul class="context-card__stats">
+            <li>
+              <i class="codicon codicon-star-full" aria-hidden="true"></i>
+              <span>{{ selectedRepoDetails.stars }} estrelas</span>
+            </li>
+            <li>
+              <i class="codicon codicon-git-branch" aria-hidden="true"></i>
+              <span>{{ selectedRepoDetails.forks }} forks</span>
+            </li>
+            <li>
+              <i class="codicon codicon-issue-opened" aria-hidden="true"></i>
+              <span>{{ selectedRepoDetails.issues }} issues abertas</span>
+            </li>
+          </ul>
+        </div>
+        <div v-else class="context-placeholder">
+          <i class="codicon codicon-github"></i>
+          <p>Conecte-se e selecione um repositório para visualizar detalhes por aqui.</p>
+        </div>
       </section>
     </div>
   </div>
@@ -810,28 +875,70 @@ onBeforeUnmount(() => {
   border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
-  align-items: center;
-  padding: 28px 14px;
-  gap: 20px;
+  align-items: stretch;
+  padding: 28px 18px;
+  gap: 24px;
+  width: 220px;
 }
 
 .toolbar__brand {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
   background: linear-gradient(145deg, var(--accent-primary), var(--accent-secondary));
   display: grid;
   place-items: center;
   color: var(--surface-0);
   font-weight: 700;
-  font-size: 18px;
+  font-size: 20px;
   box-shadow: var(--shadow-elevated);
+  align-self: center;
+}
+
+.toolbar__repo-button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(9, 14, 23, 0.85);
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  padding: 12px 16px;
+  color: var(--text-soft);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.toolbar__repo-button .codicon {
+  font-size: 18px;
+}
+
+.toolbar__repo-button span {
+  flex: 1;
+  text-align: left;
+  line-height: 1.3;
+}
+
+.toolbar__repo-button:hover,
+.toolbar__repo-button:focus-visible {
+  background: rgba(79, 156, 255, 0.18);
+  border-color: var(--accent-primary);
+  color: var(--text-strong);
+}
+
+.toolbar__repo-button[aria-pressed='true'] {
+  background: rgba(79, 156, 255, 0.12);
+  border-color: var(--accent-secondary);
+  color: var(--text-strong);
+  box-shadow: inset 0 0 0 1px rgba(124, 92, 255, 0.15);
 }
 
 .toolbar__buttons {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  align-items: center;
 }
 
 .toolbar__button {
@@ -860,35 +967,6 @@ onBeforeUnmount(() => {
   display: flex;
   overflow: hidden;
   position: relative;
-}
-
-.workspace-actions {
-  position: absolute;
-  top: 18px;
-  right: 24px;
-  z-index: 3;
-}
-
-.repo-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(9, 14, 23, 0.85);
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  padding: 8px 14px;
-  color: var(--text-soft);
-  font-size: 12px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
-}
-
-.repo-toggle:hover,
-.repo-toggle:focus-visible {
-  background: rgba(79, 156, 255, 0.15);
-  border-color: var(--accent-primary);
-  color: var(--text-strong);
 }
 
 .panel {
@@ -1268,15 +1346,136 @@ onBeforeUnmount(() => {
   }
 }
 
-.webview {
-  padding: 0;
+.context {
+  background: rgba(9, 14, 23, 0.82);
 }
 
-.webview iframe {
+.context-card {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  background: rgba(6, 10, 18, 0.85);
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
+  padding: 24px;
   width: 100%;
-  height: 100%;
-  border: none;
-  background: var(--surface-3);
+  max-height: 100%;
+  overflow-y: auto;
+  box-shadow: var(--shadow-elevated);
+}
+
+.context-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.context-card__header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.context-card__full-name {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.context-card__badge {
+  background: rgba(79, 156, 255, 0.18);
+  color: var(--accent-primary);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.context-card__description {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-soft);
+}
+
+.context-card__meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.context-card__meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(10, 16, 26, 0.75);
+  border: 1px solid rgba(79, 156, 255, 0.2);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.context-card__meta dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.context-card__meta dd {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-strong);
+}
+
+.context-card__stats {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.context-card__stats li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(10, 16, 26, 0.75);
+  border: 1px solid rgba(124, 92, 255, 0.2);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.context-card__stats .codicon {
+  color: var(--accent-secondary);
+  font-size: 16px;
+}
+
+.context-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  text-align: center;
+  color: var(--text-muted);
+  border: 1px dashed rgba(79, 156, 255, 0.35);
+  border-radius: 18px;
+  padding: 32px;
+  background: rgba(6, 10, 18, 0.6);
+}
+
+.context-placeholder .codicon {
+  font-size: 48px;
+  color: var(--accent-primary);
 }
 
 .resize-handle {
@@ -1317,17 +1516,27 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1200px) {
   .toolbar {
-    padding: 20px 10px;
+    width: 200px;
+    padding: 24px 14px;
+  }
+
+  .toolbar__repo-button {
+    padding: 10px 14px;
+    font-size: 11px;
   }
 
   .toolbar__button {
     width: 36px;
     height: 36px;
   }
+
+  .context-card__meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 960px) {
-  .webview {
+  .context {
     display: none;
   }
 }
