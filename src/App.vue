@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 const token = ref('')
 const connectionState = ref('disconnected')
@@ -20,12 +20,22 @@ const openFileContent = ref('')
 const savedRepoName = ref('')
 
 const actionButtons = [
-  { label: 'Explorer', icon: '☰' },
-  { label: 'Buscar', icon: '🔍' },
-  { label: 'Commit', icon: '⎘' },
-  { label: 'Deploy', icon: '⏫' },
-  { label: 'Config', icon: '⚙️' },
+  { label: 'Explorer', icon: 'codicon-files' },
+  { label: 'Search', icon: 'codicon-search' },
+  { label: 'Source Control', icon: 'codicon-source-control' },
+  { label: 'Deploy', icon: 'codicon-cloud-upload' },
+  { label: 'Settings', icon: 'codicon-gear' },
 ]
+
+const panelSizes = reactive({
+  repositories: 320,
+  files: 340,
+  editor: 640,
+  context: 420,
+})
+
+const resizing = ref(null)
+const minPanelWidth = 220
 
 const filteredRepos = computed(() => {
   if (!repoFilter.value.trim()) {
@@ -52,6 +62,47 @@ const minimapContent = computed(() => {
     .map((line) => line.slice(0, 80))
     .join('\n')
 })
+
+function startResize(currentKey, nextKey, event) {
+  event.preventDefault()
+  const total = panelSizes[currentKey] + panelSizes[nextKey]
+  resizing.value = {
+    currentKey,
+    nextKey,
+    startX: event.clientX,
+    total,
+    startCurrent: panelSizes[currentKey],
+  }
+  window.addEventListener('pointermove', handlePointerMove)
+  window.addEventListener('pointerup', stopResize)
+}
+
+function handlePointerMove(event) {
+  const state = resizing.value
+  if (!state) {
+    return
+  }
+  const delta = event.clientX - state.startX
+  let newCurrent = state.startCurrent + delta
+  const maxCurrent = state.total - minPanelWidth
+  if (newCurrent < minPanelWidth) {
+    newCurrent = minPanelWidth
+  } else if (newCurrent > maxCurrent) {
+    newCurrent = maxCurrent
+  }
+  const newNext = state.total - newCurrent
+  panelSizes[state.currentKey] = newCurrent
+  panelSizes[state.nextKey] = newNext
+}
+
+function stopResize() {
+  if (!resizing.value) {
+    return
+  }
+  window.removeEventListener('pointermove', handlePointerMove)
+  window.removeEventListener('pointerup', stopResize)
+  resizing.value = null
+}
 
 function buildHeaders() {
   const trimmedToken = token.value.trim()
@@ -240,205 +291,184 @@ onMounted(() => {
     connectGitHub(true)
   }
 })
+
+onBeforeUnmount(() => {
+  stopResize()
+})
 </script>
 
 <template>
   <div class="codex-shell">
     <aside class="toolbar">
-      <div class="toolbar__brand">⌘</div>
+      <div class="toolbar__brand" aria-label="Codex web">⌘</div>
       <div class="toolbar__buttons">
         <button
           v-for="button in actionButtons"
           :key="button.label"
           class="toolbar__button"
           type="button"
+          :title="button.label"
         >
-          <span aria-hidden="true">{{ button.icon }}</span>
-          <span>{{ button.label }}</span>
+          <i class="codicon" :class="button.icon" aria-hidden="true"></i>
+          <span class="sr-only">{{ button.label }}</span>
         </button>
       </div>
     </aside>
 
-    <section class="repositories">
-      <header class="panel-header">
-        <div>
-          <h1>codex web</h1>
-          <p class="panel-subtitle">Conecte, selecione e navegue pelos arquivos do GitHub.</p>
+    <div class="workspace">
+      <section class="panel repositories" :style="{ width: `${panelSizes.repositories}px` }">
+        <div class="panel-block connection-card">
+          <label for="github-token">Token pessoal do GitHub</label>
+          <div class="token-row">
+            <input
+              id="github-token"
+              v-model="token"
+              :disabled="connectionState === 'connecting'"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              type="password"
+              placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+            />
+            <button
+              class="primary"
+              type="button"
+              :disabled="connectionState === 'connecting' || !token"
+              @click="connectGitHub()"
+            >
+              {{ connectionState === 'connected' ? 'Reconectar' : 'Conectar' }}
+            </button>
+          </div>
+          <p class="hint">Use um token com permissão <strong>repo:read</strong>. Ele é mantido apenas localmente neste navegador.</p>
+          <p v-if="connectionError" class="error">{{ connectionError }}</p>
+          <p v-if="userProfile" class="success">
+            Conectado como <strong>{{ userProfile.login }}</strong>
+          </p>
         </div>
-      </header>
 
-      <div class="connection-card">
-        <label for="github-token">Token pessoal do GitHub</label>
-        <div class="token-row">
+        <div class="panel-block list-section" :class="{ 'list-section--disabled': connectionState !== 'connected' }">
           <input
-            id="github-token"
-            v-model="token"
-            :disabled="connectionState === 'connecting'"
-            autocomplete="off"
-            autocapitalize="off"
-            spellcheck="false"
-            type="password"
-            placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+            v-model="repoFilter"
+            :disabled="connectionState !== 'connected'"
+            class="search-input"
+            placeholder="Filtrar repositórios"
+            type="search"
           />
-          <button
-            class="primary"
-            type="button"
-            :disabled="connectionState === 'connecting' || !token"
-            @click="connectGitHub()"
-          >
-            {{ connectionState === 'connected' ? 'Reconectar' : 'Conectar' }}
-          </button>
+          <div class="repo-list" role="list">
+            <button
+              v-for="repo in filteredRepos"
+              :key="repo.id"
+              class="repo-item"
+              role="listitem"
+              type="button"
+              :class="{ 'repo-item--active': selectedRepo && repo.id === selectedRepo.id }"
+              @click="selectRepository(repo)"
+            >
+              <div>
+                <strong>{{ repo.name }}</strong>
+                <p>{{ repo.full_name }}</p>
+              </div>
+              <span class="repo-meta">{{ new Date(repo.updated_at).toLocaleDateString() }}</span>
+            </button>
+            <p v-if="!filteredRepos.length && connectionState === 'connected'" class="empty">Nenhum repositório encontrado.</p>
+          </div>
         </div>
-        <p class="hint">Use um token com permissão <strong>repo:read</strong>. Ele é mantido apenas localmente neste navegador.</p>
-        <p v-if="connectionError" class="error">{{ connectionError }}</p>
-        <p v-if="userProfile" class="success">
-          Conectado como <strong>{{ userProfile.login }}</strong>
-        </p>
-      </div>
+      </section>
 
-      <div class="list-section" :class="{ 'list-section--disabled': connectionState !== 'connected' }">
-        <div class="list-header">
-          <h2>Repositórios</h2>
-          <span v-if="isLoadingRepos" class="tag">carregando…</span>
-        </div>
-        <input
-          v-model="repoFilter"
-          :disabled="connectionState !== 'connected'"
-          class="search-input"
-          placeholder="Filtrar repositórios"
-          type="search"
-        />
-        <div class="repo-list" role="list">
-          <button
-            v-for="repo in filteredRepos"
-            :key="repo.id"
-            class="repo-item"
-            role="listitem"
-            type="button"
-            :class="{ 'repo-item--active': selectedRepo && repo.id === selectedRepo.id }"
-            @click="selectRepository(repo)"
-          >
-            <div>
-              <strong>{{ repo.name }}</strong>
-              <p>{{ repo.full_name }}</p>
-            </div>
-            <span class="repo-meta">{{ new Date(repo.updated_at).toLocaleDateString() }}</span>
-          </button>
-          <p v-if="!filteredRepos.length && connectionState === 'connected'" class="empty">Nenhum repositório encontrado.</p>
-        </div>
-      </div>
-    </section>
+      <div
+        class="resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        @pointerdown="(event) => startResize('repositories', 'files', event)"
+      ></div>
 
-    <section class="files">
-      <header class="panel-header">
-        <div>
-          <h2>Arquivos</h2>
-          <p class="panel-subtitle">{{ statusMessage }}</p>
+      <section class="panel files" :style="{ width: `${panelSizes.files}px` }">
+        <div class="panel-block status-banner">
+          <span>{{ statusMessage }}</span>
+          <div class="status-flags">
+            <span v-if="isLoadingRepos" class="tag">conectando…</span>
+            <span v-if="isLoadingFiles" class="tag">atualizando…</span>
+          </div>
         </div>
-        <div class="file-info" v-if="openFilePath">
-          <span class="file-info__name">{{ openFilePath }}</span>
+        <div class="panel-block list-section">
+          <input
+            v-model="fileSearch"
+            :disabled="!selectedRepo || isLoadingFiles"
+            class="search-input"
+            placeholder="Filtrar arquivos"
+            type="search"
+          />
+          <div class="file-list" role="list">
+            <button
+              v-for="entry in filteredFiles"
+              :key="entry.sha"
+              class="file-item"
+              role="listitem"
+              type="button"
+              :class="{ 'file-item--active': entry.path === openFilePath }"
+              @click="openFile(entry)"
+            >
+              <span class="file-path">{{ entry.path }}</span>
+              <span class="file-size">{{ formatFileSize(entry.size) }}</span>
+            </button>
+            <p v-if="!filteredFiles.length && selectedRepo && !isLoadingFiles" class="empty">Nenhum arquivo encontrado.</p>
+          </div>
+        </div>
+      </section>
+
+      <div
+        class="resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        @pointerdown="(event) => startResize('files', 'editor', event)"
+      ></div>
+
+      <section class="panel editor" :style="{ width: `${panelSizes.editor}px` }">
+        <div class="editor-topbar">
+          <span class="editor-breadcrumb">{{ openFilePath || 'Nenhum arquivo aberto' }}</span>
           <span v-if="isLoadingFileContent" class="tag">carregando…</span>
         </div>
-      </header>
-
-      <div class="list-section">
-        <div class="list-header">
-          <h3>Estrutura</h3>
-          <span v-if="isLoadingFiles" class="tag">atualizando…</span>
+        <div class="editor-surface">
+          <div v-if="!openFilePath" class="editor-placeholder">
+            <p>Selecione um arquivo para exibir o conteúdo aqui.</p>
+          </div>
+          <textarea
+            v-else
+            v-model="openFileContent"
+            class="code-editor"
+            spellcheck="false"
+          ></textarea>
+          <div v-if="openFilePath" class="editor-minimap">
+            <pre>{{ minimapContent }}</pre>
+          </div>
         </div>
-        <input
-          v-model="fileSearch"
-          :disabled="!selectedRepo || isLoadingFiles"
-          class="search-input"
-          placeholder="Filtrar arquivos"
-          type="search"
-        />
-        <div class="file-list" role="list">
-          <button
-            v-for="entry in filteredFiles"
-            :key="entry.sha"
-            class="file-item"
-            role="listitem"
-            type="button"
-            :class="{ 'file-item--active': entry.path === openFilePath }"
-            @click="openFile(entry)"
-          >
-            <span class="file-path">{{ entry.path }}</span>
-            <span class="file-size">{{ formatFileSize(entry.size) }}</span>
-          </button>
-          <p v-if="!filteredFiles.length && selectedRepo && !isLoadingFiles" class="empty">Nenhum arquivo encontrado.</p>
-        </div>
-      </div>
-    </section>
+        <p v-if="fileError" class="error error--inline">{{ fileError }}</p>
+      </section>
 
-    <section class="editor">
-      <header class="panel-header">
-        <div>
-          <h2>Editor</h2>
-          <p class="panel-subtitle">Visualize o conteúdo dos arquivos selecionados.</p>
-        </div>
-      </header>
-      <div class="editor-surface">
-        <div v-if="!openFilePath" class="editor-placeholder">
-          <p>Selecione um arquivo para exibir o conteúdo aqui.</p>
-        </div>
-        <textarea
-          v-else
-          v-model="openFileContent"
-          class="code-editor"
-          spellcheck="false"
-        ></textarea>
-      </div>
-      <p v-if="fileError" class="error error--inline">{{ fileError }}</p>
-    </section>
+      <div
+        class="resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        @pointerdown="(event) => startResize('editor', 'context', event)"
+      ></div>
 
-    <aside class="minimap">
-      <header class="panel-header">
-        <h2>scroll editor</h2>
-      </header>
-      <div class="minimap-surface">
-        <pre>{{ minimapContent }}</pre>
-      </div>
-    </aside>
-
-    <aside class="context-panel">
-      <header class="panel-header">
-        <h2>codex web</h2>
-        <p class="panel-subtitle">Insights rápidos sobre o seu projeto.</p>
-      </header>
-      <div class="context-cards">
-        <article class="context-card">
-          <h3>Estado</h3>
-          <p>{{ selectedRepo ? `Repositório ${selectedRepo.full_name}` : 'Nenhum repositório selecionado' }}</p>
-        </article>
-        <article class="context-card">
-          <h3>Arquivo ativo</h3>
-          <p>{{ openFilePath || 'Selecione um arquivo para visualizar detalhes.' }}</p>
-        </article>
-        <article class="context-card">
-          <h3>Atividade</h3>
-          <p v-if="selectedRepo">Última atualização: {{ new Date(selectedRepo.updated_at).toLocaleString() }}</p>
-          <p v-else>Conecte-se para acompanhar sua atividade.</p>
-        </article>
-        <article class="context-card">
-          <h3>Dicas</h3>
-          <ul>
-            <li>Use a busca para localizar arquivos rapidamente.</li>
-            <li>Tokens são armazenados somente no navegador.</li>
-            <li>Arquivos binários podem não ser exibidos corretamente.</li>
-          </ul>
-        </article>
-      </div>
-    </aside>
+      <section class="panel webview" :style="{ width: `${panelSizes.context}px` }">
+        <iframe
+          src="https://chatgpt.com/codex"
+          title="Codex web preview"
+          loading="lazy"
+          referrerpolicy="no-referrer"
+        ></iframe>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .codex-shell {
   flex: 1;
-  display: grid;
-  grid-template-columns: 92px 320px 340px 1fr 180px 300px;
-  grid-template-rows: 100%;
+  display: flex;
+  height: 100vh;
   background: linear-gradient(135deg, var(--surface-0), var(--surface-2));
   color: var(--text-soft);
 }
@@ -449,13 +479,13 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 32px 18px;
-  gap: 24px;
+  padding: 28px 14px;
+  gap: 20px;
 }
 
 .toolbar__brand {
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   border-radius: 12px;
   background: linear-gradient(145deg, var(--accent-primary), var(--accent-secondary));
   display: grid;
@@ -469,28 +499,22 @@ onMounted(() => {
 .toolbar__buttons {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
 .toolbar__button {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 0;
-  width: 100%;
-  border-radius: 12px;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
   background: transparent;
   transition: background 0.2s ease, color 0.2s ease;
 }
 
-.toolbar__button span:first-child {
-  font-size: 18px;
-}
-
-.toolbar__button span:last-child {
-  font-size: 12px;
-  letter-spacing: 0.04em;
+.toolbar__button .codicon {
+  font-size: 20px;
 }
 
 .toolbar__button:hover,
@@ -499,70 +523,44 @@ onMounted(() => {
   color: var(--text-strong);
 }
 
-.repositories,
-.files,
-.editor,
-.minimap,
-.context-panel {
-  padding: 28px 24px;
-  border-right: 1px solid var(--color-border);
-  background: rgba(14, 21, 34, 0.65);
-  backdrop-filter: blur(22px);
+.workspace {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  position: relative;
 }
 
-.context-panel {
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 24px 20px;
+  background: rgba(14, 21, 34, 0.7);
+  backdrop-filter: blur(18px);
+  border-right: 1px solid var(--color-border);
+  overflow: hidden;
+}
+
+.panel:last-of-type {
   border-right: none;
 }
 
-.panel-header {
+.panel-block {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.panel-header h1,
-.panel-header h2,
-.panel-header h3 {
-  color: var(--text-strong);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.panel-header h1 {
-  font-size: 24px;
-}
-
-.panel-header h2 {
-  font-size: 18px;
-}
-
-.panel-header h3 {
-  font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
-}
-
-.panel-subtitle {
-  font-size: 13px;
-  color: var(--text-muted);
-  margin-top: 4px;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .connection-card {
   background: var(--surface-2);
   border: 1px solid var(--color-border);
   border-radius: 16px;
-  padding: 20px;
+  padding: 18px;
   box-shadow: var(--shadow-elevated);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
 }
 
 .connection-card label {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
@@ -614,7 +612,7 @@ onMounted(() => {
 }
 
 .error--inline {
-  margin-top: 8px;
+  margin-top: -8px;
 }
 
 .success {
@@ -623,21 +621,12 @@ onMounted(() => {
 }
 
 .list-section {
-  margin-top: 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  flex: 1;
 }
 
 .list-section--disabled {
-  opacity: 0.4;
+  opacity: 0.5;
   pointer-events: none;
-}
-
-.list-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 
 .search-input {
@@ -658,9 +647,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: calc(100vh - 320px);
   overflow-y: auto;
-  padding-right: 4px;
+  padding-right: 6px;
 }
 
 .repo-item,
@@ -725,19 +713,20 @@ onMounted(() => {
   padding: 16px 0;
 }
 
-.file-info {
-  display: flex;
+.status-banner {
+  flex-direction: row;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  background: rgba(9, 14, 23, 0.6);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--text-soft);
 }
 
-.file-info__name {
-  font-size: 12px;
-  color: var(--text-muted);
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.status-flags {
+  display: flex;
+  gap: 8px;
 }
 
 .tag {
@@ -754,139 +743,144 @@ onMounted(() => {
   background: rgba(9, 14, 23, 0.82);
 }
 
+.editor-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(9, 14, 23, 0.6);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: var(--text-soft);
+}
+
+.editor-breadcrumb {
+  font-size: 12px;
+  max-width: 70%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .editor-surface {
+  position: relative;
   flex: 1;
   background: var(--surface-2);
   border: 1px solid var(--color-border);
   border-radius: 18px;
-  padding: 16px;
-  min-height: calc(100vh - 200px);
+  margin-top: 12px;
+  overflow: hidden;
   display: flex;
-  flex-direction: column;
 }
 
 .editor-placeholder {
-  flex: 1;
+  width: 100%;
   display: grid;
   place-items: center;
   color: var(--text-muted);
   border: 2px dashed rgba(126, 142, 178, 0.18);
   border-radius: 14px;
-  font-size: 14px;
+  margin: 18px;
 }
 
 .code-editor {
   flex: 1;
   background: var(--surface-3);
   color: var(--text-strong);
-  border: 1px solid rgba(126, 142, 178, 0.18);
-  border-radius: 14px;
-  padding: 16px;
+  border: none;
+  padding: 24px;
   font-family: inherit;
   font-size: 13px;
   line-height: 1.5;
   resize: none;
-  min-height: 100%;
   white-space: pre;
   overflow: auto;
+  padding-right: 140px;
 }
 
-.minimap {
-  background: rgba(10, 16, 26, 0.82);
-}
-
-.minimap-surface {
-  background: var(--surface-3);
-  border: 1px solid var(--color-border);
-  border-radius: 16px;
-  padding: 12px;
-  height: calc(100vh - 160px);
+.editor-minimap {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  bottom: 16px;
+  width: 112px;
+  background: rgba(5, 8, 15, 0.8);
+  border: 1px solid rgba(79, 156, 255, 0.2);
+  border-radius: 10px;
   overflow: hidden;
+  pointer-events: none;
 }
 
-.minimap pre {
+.editor-minimap pre {
   font-family: inherit;
   font-size: 8px;
   line-height: 0.7;
+  padding: 12px 8px;
+  color: rgba(231, 236, 255, 0.4);
   white-space: pre;
-  color: rgba(231, 236, 255, 0.38);
 }
 
-.context-panel {
-  background: rgba(14, 20, 32, 0.74);
+.webview {
+  padding: 0;
 }
 
-.context-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
+.webview iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--surface-3);
 }
 
-.context-card {
-  background: var(--surface-2);
-  border: 1px solid var(--color-border);
-  border-radius: 16px;
-  padding: 18px;
-  box-shadow: var(--shadow-elevated);
+.resize-handle {
+  width: 6px;
+  cursor: col-resize;
+  background: rgba(10, 16, 26, 0.6);
+  border-right: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-border);
+  transition: background 0.2s ease;
 }
 
-.context-card h3 {
-  color: var(--text-strong);
-  font-size: 14px;
-  margin-bottom: 8px;
+.resize-handle:hover,
+.resize-handle:active {
+  background: rgba(79, 156, 255, 0.25);
 }
 
-.context-card p,
-.context-card li {
-  color: var(--text-soft);
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.context-card ul {
-  list-style: disc;
-  margin-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-@media (max-width: 1680px) {
-  .codex-shell {
-    grid-template-columns: 80px 280px 320px 1fr 160px 260px;
-  }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 @media (max-width: 1440px) {
-  .codex-shell {
-    grid-template-columns: 72px 260px 300px minmax(360px, 1fr);
-    grid-template-areas:
-      'toolbar repos files editor'
-      'toolbar repos files editor';
+  .workspace {
+    overflow-x: auto;
   }
 
-  .minimap,
-  .context-panel {
-    display: none;
+  .panel {
+    min-width: 260px;
   }
 }
 
 @media (max-width: 1200px) {
-  .codex-shell {
-    grid-template-columns: 64px 260px 1fr;
+  .toolbar {
+    padding: 20px 10px;
   }
 
-  .files {
-    display: none;
+  .toolbar__button {
+    width: 36px;
+    height: 36px;
   }
 }
 
-@media (max-width: 900px) {
-  .codex-shell {
-    grid-template-columns: 56px 1fr;
-  }
-
-  .repositories {
+@media (max-width: 960px) {
+  .webview {
     display: none;
   }
 }
