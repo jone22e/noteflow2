@@ -1,5 +1,7 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
+import CodeEditor from './components/CodeEditor.vue'
+import FileTreeNode from './components/FileTreeNode.vue'
 
 const token = ref('')
 const connectionState = ref('disconnected')
@@ -8,15 +10,17 @@ const userProfile = ref(null)
 const repos = ref([])
 const repoFilter = ref('')
 const selectedRepo = ref(null)
-const files = ref([])
+const fileTree = ref([])
 const fileSearch = ref('')
 const statusMessage = ref('Conecte-se ao GitHub para começar.')
 const isLoadingRepos = ref(false)
 const isLoadingFiles = ref(false)
 const isLoadingFileContent = ref(false)
 const fileError = ref('')
-const openFilePath = ref('')
-const openFileContent = ref('')
+const showRepoPanel = ref(true)
+const expandedPaths = shallowRef(new Set())
+const openFiles = reactive([])
+const activeFilePath = ref('')
 const savedRepoName = ref('')
 
 const actionButtons = [
@@ -34,6 +38,8 @@ const panelSizes = reactive({
   context: 420,
 })
 
+const defaultRepositoryWidth = panelSizes.repositories
+
 const resizing = ref(null)
 const minPanelWidth = 220
 
@@ -45,23 +51,271 @@ const filteredRepos = computed(() => {
   return repos.value.filter((repo) => repo.name.toLowerCase().includes(term) || repo.full_name.toLowerCase().includes(term))
 })
 
-const filteredFiles = computed(() => {
-  if (!fileSearch.value.trim()) {
-    return files.value
-  }
+const isSearchActive = computed(() => !!fileSearch.value.trim())
+
+const filteredFileTree = computed(() => {
   const term = fileSearch.value.trim().toLowerCase()
-  return files.value.filter((entry) => entry.path.toLowerCase().includes(term))
+  if (!term) {
+    return fileTree.value
+  }
+
+  function filterNodes(nodes) {
+    const result = []
+    for (const node of nodes) {
+      if (node.type === 'directory') {
+        const filteredChildren = filterNodes(node.children)
+        if (filteredChildren.length) {
+          result.push({ ...node, children: filteredChildren })
+          continue
+        }
+        if (node.name.toLowerCase().includes(term)) {
+          result.push({ ...node, children: [] })
+        }
+      } else if (node.path.toLowerCase().includes(term)) {
+        result.push({ ...node })
+      }
+    }
+    return result
+  }
+
+  return filterNodes(fileTree.value)
 })
 
-const minimapContent = computed(() => {
-  if (!openFileContent.value) {
-    return ''
+const activeFile = computed(() => openFiles.find((entry) => entry.path === activeFilePath.value) || null)
+
+const activeFileLanguage = computed(() => activeFile.value?.language || 'plaintext')
+
+function detectLanguage(path) {
+  if (!path) {
+    return 'plaintext'
   }
-  return openFileContent.value
-    .split('\n')
-    .map((line) => line.slice(0, 80))
-    .join('\n')
-})
+
+  const normalized = path.toLowerCase()
+  if (normalized === 'dockerfile') {
+    return 'dockerfile'
+  }
+  if (normalized.endsWith('.d.ts')) {
+    return 'typescript'
+  }
+
+  const extensionMatch = normalized.match(/\.([^.]+)$/)
+  const extension = extensionMatch ? extensionMatch[1] : ''
+
+  const map = {
+    js: 'javascript',
+    cjs: 'javascript',
+    mjs: 'javascript',
+    jsx: 'javascript',
+    ts: 'typescript',
+    tsx: 'typescript',
+    json: 'json',
+    jsonc: 'json',
+    vue: 'html',
+    html: 'html',
+    css: 'css',
+    scss: 'scss',
+    less: 'less',
+    sass: 'scss',
+    md: 'markdown',
+    markdown: 'markdown',
+    yaml: 'yaml',
+    yml: 'yaml',
+    py: 'python',
+    rb: 'ruby',
+    php: 'php',
+    go: 'go',
+    java: 'java',
+    kt: 'kotlin',
+    swift: 'swift',
+    rs: 'rust',
+    cs: 'csharp',
+    cpp: 'cpp',
+    cxx: 'cpp',
+    c: 'c',
+    h: 'cpp',
+    hpp: 'cpp',
+    sql: 'sql',
+    sh: 'shell',
+    bash: 'shell',
+    zsh: 'shell',
+    ps1: 'powershell',
+    xml: 'xml',
+    txt: 'plaintext',
+    ini: 'ini',
+    env: 'ini',
+    cfg: 'ini',
+    toml: 'toml',
+    dockerfile: 'dockerfile',
+  }
+
+  return map[extension] || 'plaintext'
+}
+
+function buildFileTree(blobs) {
+  const rootNodes = []
+  const directoryMap = new Map()
+  directoryMap.set('', { children: rootNodes })
+
+  for (const blob of blobs) {
+    const segments = blob.path.split('/')
+    let parent = directoryMap.get('')
+    let currentPath = ''
+
+    segments.forEach((segment, index) => {
+      const isLast = index === segments.length - 1
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment
+
+      if (isLast) {
+        parent.children.push({
+          type: 'file',
+          name: segment,
+          path: blob.path,
+          sha: blob.sha,
+          size: blob.size,
+        })
+        return
+      }
+
+      let directory = directoryMap.get(currentPath)
+      if (!directory) {
+        directory = {
+          type: 'directory',
+          name: segment,
+          path: currentPath,
+          children: [],
+        }
+        parent.children.push(directory)
+        directoryMap.set(currentPath, directory)
+      }
+      parent = directory
+    })
+  }
+
+  function sortChildren(children) {
+    children.sort((a, b) => {
+      if (a.type === b.type) {
+        return a.name.localeCompare(b.name)
+      }
+      return a.type === 'directory' ? -1 : 1
+    })
+
+    children.forEach((child) => {
+      if (child.type === 'directory') {
+        sortChildren(child.children)
+      }
+    })
+  }
+
+  sortChildren(rootNodes)
+  return rootNodes
+}
+
+function toggleDirectory(path) {
+  const next = new Set(expandedPaths.value)
+  if (next.has(path)) {
+    next.delete(path)
+  } else {
+    next.add(path)
+  }
+  expandedPaths.value = next
+}
+
+function ensureExpandedForPath(path) {
+  if (!path) {
+    return
+  }
+  const segments = path.split('/')
+  if (segments.length <= 1) {
+    return
+  }
+  const next = new Set(expandedPaths.value)
+  let currentPath = ''
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    currentPath = currentPath ? `${currentPath}/${segments[index]}` : segments[index]
+    next.add(currentPath)
+  }
+  expandedPaths.value = next
+}
+
+function setActiveTab(path) {
+  activeFilePath.value = path
+  ensureExpandedForPath(path)
+}
+
+function closeTab(path) {
+  const index = openFiles.findIndex((entry) => entry.path === path)
+  if (index === -1) {
+    return
+  }
+  openFiles.splice(index, 1)
+
+  if (activeFilePath.value === path) {
+    if (openFiles.length) {
+      const nextIndex = index > 0 ? index - 1 : 0
+      const nextPath = openFiles[nextIndex]?.path || ''
+      activeFilePath.value = nextPath
+      ensureExpandedForPath(nextPath)
+    } else {
+      activeFilePath.value = ''
+    }
+  }
+}
+
+function updateActiveFileContent(value) {
+  const file = activeFile.value
+  if (!file) {
+    return
+  }
+  file.content = value
+  file.isDirty = value !== file.originalContent
+}
+
+function collapseRepositoryPanel() {
+  if (!showRepoPanel.value) {
+    return
+  }
+  const width = panelSizes.repositories
+  panelSizes.repositories = 0
+  panelSizes.files += width
+  showRepoPanel.value = false
+}
+
+function revealRepositorySelector() {
+  if (showRepoPanel.value) {
+    return
+  }
+
+  let desiredWidth = Math.max(defaultRepositoryWidth, minPanelWidth)
+  let remaining = desiredWidth
+
+  const adjustPanel = (key) => {
+    if (remaining <= 0) {
+      return
+    }
+    const available = panelSizes[key] - minPanelWidth
+    if (available <= 0) {
+      return
+    }
+    const take = Math.min(available, remaining)
+    panelSizes[key] -= take
+    remaining -= take
+  }
+
+  adjustPanel('files')
+  adjustPanel('editor')
+  adjustPanel('context')
+
+  panelSizes.repositories = Math.max(minPanelWidth, desiredWidth - remaining)
+  showRepoPanel.value = true
+}
+
+function toggleRepositorySelector() {
+  if (showRepoPanel.value) {
+    collapseRepositoryPanel()
+  } else {
+    revealRepositorySelector()
+  }
+}
 
 function startResize(currentKey, nextKey, event) {
   event.preventDefault()
@@ -187,6 +441,7 @@ async function selectRepository(repo) {
   savedRepoName.value = repo.full_name
   localStorage.setItem('codex:last-repo', repo.full_name)
   await loadRepositoryFiles()
+  collapseRepositoryPanel()
 }
 
 async function loadRepositoryFiles() {
@@ -195,11 +450,12 @@ async function loadRepositoryFiles() {
   }
 
   isLoadingFiles.value = true
-  files.value = []
+  fileTree.value = []
   fileSearch.value = ''
-  openFilePath.value = ''
-  openFileContent.value = ''
+  openFiles.splice(0, openFiles.length)
+  activeFilePath.value = ''
   fileError.value = ''
+  expandedPaths.value = new Set()
 
   try {
     const headers = buildHeaders()
@@ -216,13 +472,13 @@ async function loadRepositoryFiles() {
     }
     const blobs = treeData.tree.filter((node) => node.type === 'blob')
     blobs.sort((a, b) => a.path.localeCompare(b.path))
-    files.value = blobs
+    fileTree.value = buildFileTree(blobs)
     statusMessage.value = `${blobs.length} arquivos carregados de ${selectedRepo.value.name}.`
     if (!blobs.length) {
       statusMessage.value = 'Nenhum arquivo encontrado neste repositório.'
     }
   } catch (error) {
-    files.value = []
+    fileTree.value = []
     statusMessage.value = error instanceof Error ? error.message : 'Não foi possível carregar os arquivos.'
   } finally {
     isLoadingFiles.value = false
@@ -240,10 +496,37 @@ async function openFile(entry) {
     return
   }
 
-  isLoadingFileContent.value = true
+  ensureExpandedForPath(entry.path)
+
+  let tab = openFiles.find((item) => item.path === entry.path)
+  if (!tab) {
+    tab = {
+      path: entry.path,
+      name: entry.name || entry.path.split('/').pop(),
+      content: '',
+      originalContent: '',
+      language: detectLanguage(entry.path),
+      isDirty: false,
+      isLoading: true,
+      hasLoaded: false,
+    }
+    openFiles.push(tab)
+  } else {
+    tab.name = entry.name || entry.path.split('/').pop()
+    tab.language = detectLanguage(entry.path)
+  }
+
+  activeFilePath.value = entry.path
   fileError.value = ''
-  openFilePath.value = entry.path
-  openFileContent.value = ''
+
+  if (tab.hasLoaded) {
+    tab.isLoading = false
+    statusMessage.value = `${entry.path} aberto.`
+    return
+  }
+
+  tab.isLoading = true
+  isLoadingFileContent.value = true
 
   try {
     const headers = buildHeaders()
@@ -258,28 +541,25 @@ async function openFile(entry) {
       throw new Error('Não foi possível abrir o arquivo selecionado.')
     }
     const fileData = await fileResponse.json()
+    let content = ''
     if (fileData.encoding === 'base64') {
-      const decoded = atob((fileData.content || '').replace(/\n/g, ''))
-      openFileContent.value = decoded
+      content = atob((fileData.content || '').replace(/\n/g, ''))
     } else if (typeof fileData.content === 'string') {
-      openFileContent.value = fileData.content
-    } else {
-      openFileContent.value = ''
+      content = fileData.content
     }
+    tab.content = content
+    tab.originalContent = content
+    tab.isDirty = false
+    tab.isLoading = false
+    tab.hasLoaded = true
     statusMessage.value = `${entry.path} carregado com sucesso.`
   } catch (error) {
+    tab.isLoading = false
     fileError.value = error instanceof Error ? error.message : 'Erro desconhecido ao carregar o arquivo.'
     statusMessage.value = fileError.value
   } finally {
     isLoadingFileContent.value = false
   }
-}
-
-function formatFileSize(size) {
-  if (size == null) return ''
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
 onMounted(() => {
@@ -316,7 +596,18 @@ onBeforeUnmount(() => {
     </aside>
 
     <div class="workspace">
-      <section class="panel repositories" :style="{ width: `${panelSizes.repositories}px` }">
+      <div v-if="selectedRepo" class="workspace-actions">
+        <button class="repo-toggle" type="button" @click="toggleRepositorySelector">
+          <i class="codicon codicon-repo"></i>
+          <span>{{ showRepoPanel ? 'Ocultar repositórios' : 'Selecionar repositório' }}</span>
+        </button>
+      </div>
+
+      <section
+        v-if="showRepoPanel || !selectedRepo"
+        class="panel repositories"
+        :style="{ width: `${panelSizes.repositories}px` }"
+      >
         <div class="panel-block connection-card">
           <label for="github-token">Token pessoal do GitHub</label>
           <div class="token-row">
@@ -376,6 +667,7 @@ onBeforeUnmount(() => {
       </section>
 
       <div
+        v-if="showRepoPanel || !selectedRepo"
         class="resize-handle"
         role="separator"
         aria-orientation="vertical"
@@ -398,20 +690,27 @@ onBeforeUnmount(() => {
             placeholder="Filtrar arquivos"
             type="search"
           />
-          <div class="file-list" role="list">
-            <button
-              v-for="entry in filteredFiles"
-              :key="entry.sha"
-              class="file-item"
-              role="listitem"
-              type="button"
-              :class="{ 'file-item--active': entry.path === openFilePath }"
-              @click="openFile(entry)"
+          <div class="file-tree" role="tree">
+            <template v-if="filteredFileTree.length">
+              <FileTreeNode
+                v-for="node in filteredFileTree"
+                :key="node.path"
+                :node="node"
+                :level="0"
+                :active-path="activeFilePath"
+                :expanded-paths="expandedPaths.value"
+                :is-search-active="isSearchActive"
+                @toggle="toggleDirectory"
+                @select="openFile"
+              />
+            </template>
+            <p
+              v-if="selectedRepo && !filteredFileTree.length && !isLoadingFiles"
+              class="empty"
             >
-              <span class="file-path">{{ entry.path }}</span>
-              <span class="file-size">{{ formatFileSize(entry.size) }}</span>
-            </button>
-            <p v-if="!filteredFiles.length && selectedRepo && !isLoadingFiles" class="empty">Nenhum arquivo encontrado.</p>
+              Nenhum arquivo encontrado.
+            </p>
+            <p v-if="!selectedRepo" class="empty">Selecione um repositório para visualizar a árvore.</p>
           </div>
         </div>
       </section>
@@ -425,21 +724,47 @@ onBeforeUnmount(() => {
 
       <section class="panel editor" :style="{ width: `${panelSizes.editor}px` }">
         <div class="editor-topbar">
-          <span class="editor-breadcrumb">{{ openFilePath || 'Nenhum arquivo aberto' }}</span>
-          <span v-if="isLoadingFileContent" class="tag">carregando…</span>
+          <div class="tab-bar" role="tablist">
+            <button
+              v-for="file in openFiles"
+              :key="file.path"
+              class="tab"
+              type="button"
+              role="tab"
+              :aria-selected="file.path === activeFilePath"
+              :class="{ 'tab--active': file.path === activeFilePath, 'tab--dirty': file.isDirty }"
+              @click="setActiveTab(file.path)"
+            >
+              <span class="tab__title">{{ file.name }}</span>
+              <span v-if="file.isDirty" class="tab__dirty" aria-hidden="true">•</span>
+              <span v-if="file.isLoading" class="tab__status codicon codicon-sync"></span>
+              <button class="tab__close" type="button" @click.stop="closeTab(file.path)">
+                <i class="codicon codicon-close"></i>
+                <span class="sr-only">Fechar {{ file.name }}</span>
+              </button>
+            </button>
+            <p v-if="!openFiles.length" class="tab-empty">Nenhum arquivo aberto</p>
+          </div>
+          <div class="editor-topbar__meta">
+            <span class="editor-breadcrumb">{{ activeFile ? activeFile.path : 'Nenhum arquivo aberto' }}</span>
+            <span v-if="isLoadingFileContent" class="tag">carregando…</span>
+          </div>
         </div>
         <div class="editor-surface">
-          <div v-if="!openFilePath" class="editor-placeholder">
+          <div v-if="!activeFile" class="editor-placeholder">
             <p>Selecione um arquivo para exibir o conteúdo aqui.</p>
           </div>
-          <textarea
-            v-else
-            v-model="openFileContent"
-            class="code-editor"
-            spellcheck="false"
-          ></textarea>
-          <div v-if="openFilePath" class="editor-minimap">
-            <pre>{{ minimapContent }}</pre>
+          <div v-else class="editor-canvas">
+            <CodeEditor
+              :model-value="activeFile.content"
+              :language="activeFileLanguage"
+              :path="activeFile.path"
+              @update:modelValue="updateActiveFileContent"
+            />
+            <div v-if="activeFile.isLoading" class="editor-loading" role="status">
+              <span class="codicon codicon-sync"></span>
+              <span>Carregando conteúdo…</span>
+            </div>
           </div>
         </div>
         <p v-if="fileError" class="error error--inline">{{ fileError }}</p>
@@ -528,6 +853,35 @@ onBeforeUnmount(() => {
   display: flex;
   overflow: hidden;
   position: relative;
+}
+
+.workspace-actions {
+  position: absolute;
+  top: 18px;
+  right: 24px;
+  z-index: 3;
+}
+
+.repo-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(9, 14, 23, 0.85);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 8px 14px;
+  color: var(--text-soft);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.repo-toggle:hover,
+.repo-toggle:focus-visible {
+  background: rgba(79, 156, 255, 0.15);
+  border-color: var(--accent-primary);
+  color: var(--text-strong);
 }
 
 .panel {
@@ -641,8 +995,7 @@ onBeforeUnmount(() => {
   color: rgba(231, 236, 255, 0.3);
 }
 
-.repo-list,
-.file-list {
+.repo-list {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -650,9 +1003,16 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   padding-right: 6px;
 }
+.file-tree {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
 
-.repo-item,
-.file-item {
+.repo-item {
   background: var(--surface-3);
   border: 1px solid transparent;
   border-radius: 14px;
@@ -665,44 +1025,29 @@ onBeforeUnmount(() => {
   transition: border-color 0.2s ease, background 0.2s ease;
 }
 
-.repo-item strong,
-.file-item strong {
+.repo-item strong {
   color: var(--text-strong);
 }
 
-.repo-item p,
-.file-item span {
+.repo-item p {
   font-size: 12px;
   color: var(--text-muted);
 }
 
 .repo-item:hover,
-.repo-item:focus-visible,
-.file-item:hover,
-.file-item:focus-visible {
+.repo-item:focus-visible {
   border-color: var(--accent-primary);
   background: rgba(79, 156, 255, 0.08);
 }
 
-.repo-item--active,
-.file-item--active {
+.repo-item--active {
   border-color: var(--accent-secondary);
   background: rgba(124, 92, 255, 0.15);
 }
 
-.repo-meta,
-.file-size {
+.repo-meta {
   font-size: 11px;
   color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.file-path {
-  color: var(--text-soft);
-  font-size: 13px;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -755,6 +1100,96 @@ onBeforeUnmount(() => {
   color: var(--text-soft);
 }
 
+.tab-bar {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: rgba(13, 20, 32, 0.65);
+  color: var(--text-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 10px;
+  padding: 6px 12px;
+  font-size: 12px;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tab:hover,
+.tab:focus-visible {
+  border-color: var(--accent-primary);
+  color: var(--text-strong);
+}
+
+.tab--active {
+  background: rgba(79, 156, 255, 0.18);
+  border-color: var(--accent-secondary);
+  color: var(--text-strong);
+  box-shadow: inset 0 0 0 1px rgba(124, 92, 255, 0.2);
+}
+
+.tab__title {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab__dirty {
+  color: var(--accent-secondary);
+  font-size: 16px;
+  line-height: 1;
+  margin-top: -2px;
+}
+
+.tab__status {
+  color: var(--accent-primary);
+  font-size: 14px;
+}
+
+.tab__close {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.tab__close:hover,
+.tab__close:focus-visible {
+  background: rgba(79, 156, 255, 0.15);
+  color: var(--accent-primary);
+}
+
+.tab-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 8px;
+}
+
+.editor-topbar__meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-end;
+  min-width: 220px;
+}
+
 .editor-breadcrumb {
   font-size: 12px;
   max-width: 70%;
@@ -784,41 +1219,46 @@ onBeforeUnmount(() => {
   margin: 18px;
 }
 
-.code-editor {
+.editor-canvas {
   flex: 1;
-  background: var(--surface-3);
-  color: var(--text-strong);
-  border: none;
-  padding: 24px;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.5;
-  resize: none;
-  white-space: pre;
-  overflow: auto;
-  padding-right: 140px;
+  position: relative;
+  display: flex;
 }
 
-.editor-minimap {
+.editor-canvas :deep(.code-editor) {
+  flex: 1;
+}
+
+.editor-loading {
   position: absolute;
   top: 16px;
   right: 16px;
-  bottom: 16px;
-  width: 112px;
-  background: rgba(5, 8, 15, 0.8);
-  border: 1px solid rgba(79, 156, 255, 0.2);
-  border-radius: 10px;
-  overflow: hidden;
-  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(6, 10, 18, 0.85);
+  border: 1px solid rgba(79, 156, 255, 0.25);
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
-.editor-minimap pre {
-  font-family: inherit;
-  font-size: 8px;
-  line-height: 0.7;
-  padding: 12px 8px;
-  color: rgba(231, 236, 255, 0.4);
-  white-space: pre;
+.tab__status,
+.editor-loading .codicon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .webview {
