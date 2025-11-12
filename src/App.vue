@@ -738,10 +738,17 @@ onBeforeUnmount(() => {
               <span class="tab__title">{{ file.name }}</span>
               <span v-if="file.isDirty" class="tab__dirty" aria-hidden="true">•</span>
               <span v-if="file.isLoading" class="tab__status codicon codicon-sync"></span>
-              <button class="tab__close" type="button" @click.stop="closeTab(file.path)">
+              <span
+                class="tab__close"
+                role="button"
+                tabindex="0"
+                @click.stop="closeTab(file.path)"
+                @keydown.enter.stop.prevent="closeTab(file.path)"
+                @keydown.space.stop.prevent="closeTab(file.path)"
+              >
                 <i class="codicon codicon-close"></i>
                 <span class="sr-only">Fechar {{ file.name }}</span>
-              </button>
+              </span>
             </button>
             <p v-if="!openFiles.length" class="tab-empty">Nenhum arquivo aberto</p>
           </div>
